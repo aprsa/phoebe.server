@@ -16,9 +16,38 @@ available_ports: list[int] = []
 reserved_ports: set = set()
 
 
+def cleanup_orphaned_workers():
+    """Clean up any orphaned worker processes from previous server runs."""
+    orphaned_count = 0
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline', [])
+            if cmdline and 'phoebe_server.worker.phoebe_worker' in ' '.join(cmdline):
+                # This is a worker process - check if it's orphaned (parent not this server)
+                if proc.ppid() != psutil.Process().pid:
+                    logger.warning(f"Found orphaned worker process (PID {proc.pid}), terminating")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    orphaned_count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if orphaned_count > 0:
+        logger.info(f"Cleaned up {orphaned_count} orphaned worker process(es)")
+
+    return orphaned_count
+
+
 def load_port_config():
     """Load port pool configuration."""
     global available_ports
+
+    # Clean up any orphaned workers before initializing port pool
+    cleanup_orphaned_workers()
+
     start = config.port_pool.start
     end = config.port_pool.end
     available_ports = list(range(start, end))
@@ -67,9 +96,9 @@ def _wait_for_worker_ready(port: int, timeout: float = 30.0) -> bool:
     return False
 
 
-def launch_phoebe_server(client_ip: str | None = None, user_agent: str | None = None) -> dict:
+def launch_phoebe_worker(client_ip: str | None = None, user_agent: str | None = None) -> dict:
     """Launch a new PHOEBE worker instance."""
-    client_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
     port = request_port()
     current_time = time.time()
 
@@ -88,8 +117,8 @@ def launch_phoebe_server(client_ip: str | None = None, user_agent: str | None = 
             release_port(port)
             raise RuntimeError(f"Worker failed to start within timeout on port {port}")
 
-        server_registry[client_id] = {
-            'client_id': client_id,
+        server_registry[session_id] = {
+            'session_id': session_id,
             'process': proc,
             'created_at': current_time,
             'last_activity': current_time,
@@ -102,15 +131,15 @@ def launch_phoebe_server(client_ip: str | None = None, user_agent: str | None = 
 
         # Log to database
         database.log_session_created(
-            session_id=client_id,
+            session_id=session_id,
             created_at=current_time,
             port=port,
             client_ip=client_ip,
             user_agent=user_agent
         )
 
-        logger.info(f"Started session {client_id} on port {port}")
-        return {k: v for k, v in server_registry[client_id].items() if k != 'process'}
+        logger.info(f"Started session {session_id} on port {port}")
+        return {k: v for k, v in server_registry[session_id].items() if k != 'process'}
 
     except Exception as e:
         release_port(port)
@@ -118,59 +147,60 @@ def launch_phoebe_server(client_ip: str | None = None, user_agent: str | None = 
         raise
 
 
-def update_last_activity(client_id: str):
+def update_last_activity(session_id: str):
     """Update the last activity timestamp for a session."""
-    info = server_registry.get(client_id)
+    info = server_registry.get(session_id)
     if info:
         current_time = time.time()
         info['last_activity'] = current_time
-        database.log_session_activity(client_id, current_time)
+        database.log_session_activity(session_id, current_time)
 
 
-def get_current_memory_usage(client_id: str) -> float | None:
+def get_current_memory_usage(session_id: str) -> float | None:
     """Get current memory usage of a worker process."""
-    info = server_registry.get(client_id)
+    info = server_registry.get(session_id)
     if info and info.get('process'):
         proc = info['process']
         try:
             mem_used = proc.memory_info().rss / (1024 * 1024)  # MiB
-            server_registry[client_id]['mem_used'] = mem_used
+            server_registry[session_id]['mem_used'] = mem_used
             current_time = time.time()
-            update_last_activity(client_id)
+            update_last_activity(session_id)
             # Log metric to database
-            database.log_session_metric(client_id, current_time, mem_used)
+            database.log_session_metric(session_id, current_time, mem_used)
             return mem_used
         except psutil.NoSuchProcess:
             return None
     return None
 
 
-def get_server_info(client_id: str) -> dict | None:
+def get_server_info(session_id: str) -> dict | None:
     """Get information about a session."""
-    info = server_registry.get(client_id)
+    info = server_registry.get(session_id)
     if not info:
         return None
     return {k: v for k, v in info.items() if k != 'process'}
 
 
-def update_session_user_info(client_id: str, first_name: str, last_name: str) -> bool:
+def update_session_user_info(session_id: str, first_name: str, last_name: str, email: str) -> bool:
     """Update user information for a session."""
-    info = server_registry.get(client_id)
+    info = server_registry.get(session_id)
     if info:
         info['user_first_name'] = first_name
         info['user_last_name'] = last_name
+        info['user_email'] = email
         info['user_display_name'] = f"{first_name} {last_name}"
         current_time = time.time()
-        update_last_activity(client_id)
+        update_last_activity(session_id)
         # Log to database
-        database.log_user_info_update(client_id, first_name, last_name, current_time)
+        database.log_user_info_update(session_id, first_name, last_name, email, current_time)
         return True
     return False
 
 
-def shutdown_server(client_id: str, termination_reason: str = "manual") -> bool:
+def shutdown_server(session_id: str, termination_reason: str = "manual") -> bool:
     """Shutdown a PHOEBE worker with robust cleanup."""
-    info = server_registry.get(client_id)
+    info = server_registry.get(session_id)
     if not info:
         return False
 
@@ -185,7 +215,7 @@ def shutdown_server(client_id: str, termination_reason: str = "manual") -> bool:
                 try:
                     proc.wait(timeout=3)
                 except psutil.TimeoutExpired:
-                    logger.warning(f"Session {client_id} did not terminate gracefully, killing")
+                    logger.warning(f"Session {session_id} did not terminate gracefully, killing")
                     proc.kill()
                     proc.wait()
         except psutil.NoSuchProcess:
@@ -197,49 +227,66 @@ def shutdown_server(client_id: str, termination_reason: str = "manual") -> bool:
 
     # Log to database
     database.log_session_destroyed(
-        session_id=client_id,
+        session_id=session_id,
         destroyed_at=time.time(),
         termination_reason=termination_reason
     )
 
     # Remove from registry
-    del server_registry[client_id]
-    logger.info(f"Shutdown session {client_id}")
+    del server_registry[session_id]
+    logger.info(f"Shutdown session {session_id}")
     return True
 
 
 def list_sessions() -> dict:
     """List all active sessions."""
     # Clean up dead processes
-    dead_clients = []
-    for client_id, info in server_registry.items():
+    dead_sessions = []
+    for session_id, info in server_registry.items():
         proc = info.get("process")
         if proc and not proc.is_running():
-            dead_clients.append(client_id)
+            dead_sessions.append(session_id)
 
-    for client_id in dead_clients:
-        shutdown_server(client_id)
+    for session_id in dead_sessions:
+        shutdown_server(session_id)
 
-    return {cid: get_server_info(cid) for cid in server_registry.keys()}
+    return {sid: get_server_info(sid) for sid in server_registry.keys()}
 
 
 def cleanup_idle_sessions():
     """Clean up sessions that have been idle for longer than the configured timeout."""
     idle_timeout = config.session.idle_timeout_seconds
     current_time = time.time()
-    idle_clients = []
+    idle_sessions = []
 
-    for client_id, info in server_registry.items():
+    for session_id, info in server_registry.items():
         last_activity = info.get('last_activity', info.get('created_at', 0))
         idle_time = current_time - last_activity
         if idle_time > idle_timeout:
-            idle_clients.append(client_id)
-            logger.info(f"Session {client_id} idle for {idle_time:.0f}s, shutting down")
+            idle_sessions.append(session_id)
+            logger.info(f"Session {session_id} idle for {idle_time:.0f}s, shutting down")
 
-    for client_id in idle_clients:
-        shutdown_server(client_id, termination_reason="idle_timeout")
+    for session_id in idle_sessions:
+        shutdown_server(session_id, termination_reason="idle_timeout")
 
-    return len(idle_clients)
+    return len(idle_sessions)
+
+
+def shutdown_all_sessions():
+    """Shutdown all active sessions. Called during server shutdown."""
+    session_ids = list(server_registry.keys())
+    if not session_ids:
+        logger.info("No active sessions to shutdown")
+        return 0
+
+    logger.info(f"Shutting down {len(session_ids)} active sessions")
+    for session_id in session_ids:
+        try:
+            shutdown_server(session_id, termination_reason="server_shutdown")
+        except Exception as e:
+            logger.error(f"Error shutting down session {session_id}: {e}")
+
+    return len(session_ids)
 
 
 def get_port_status() -> dict:

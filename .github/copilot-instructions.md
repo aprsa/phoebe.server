@@ -7,10 +7,11 @@ Purpose: FastAPI service that manages per-user PHOEBE compute sessions. Each ses
 - Web API: `phoebe_server.main:app` (FastAPI) with routers in `phoebe_server/api/*`.
   - Health: `api/health.py` → `/health`, `/`.
   - Session mgmt (prefixed `/dash`): `api/session.py` → start/end/list sessions, memory, port pool.
-  - Command proxy: `api/command.py` → `/send/{client_id}` forwards JSON to a worker and tracks activity.
+  - Command proxy: `api/command.py` → `/send/{session_id}` forwards JSON to a worker and tracks activity.
 - Session Manager: `manager/session_manager.py`
-  - Tracks sessions in `server_registry` with activity timestamps; uses deque for O(1) port allocation.
+  - Tracks sessions in `server_registry` with activity timestamps; uses list for port allocation.
   - Spawns workers via `psutil.Popen([sys.executable, "-m", "phoebe_server.worker.phoebe_worker", port])`.
+  - On startup, automatically detects and terminates orphaned workers from previous runs.
   - Waits for worker readiness (ping command) before returning from start-session (30s timeout).
   - Cleans up idle sessions (configurable timeout) and terminates workers robustly (terminate → wait → kill).
   - Always frees ports on shutdown, even if worker is dead.
@@ -26,23 +27,26 @@ Purpose: FastAPI service that manages per-user PHOEBE compute sessions. Each ses
   - Sync mode (no threading/async) for simplicity.
   - Configurable command filtering (exclude ping by default).
 - Background tasks: FastAPI lifespan runs periodic cleanup (every 60s) to terminate idle sessions.
+- Graceful shutdown: When server stops (Ctrl+C or SIGTERM), all active sessions are terminated automatically to free ports and prevent orphaned ZMQ processes.
 
 ## Run and develop
 
 - Setup: Create venv at `~/.venvs/phoebe.server`, activate, install: `pip install -e .[dev]`.
 - Start server:
   - `uvicorn phoebe_server.main:app --host 0.0.0.0 --port 8001` or `phoebe-server run --port 8001`.
-  - Lifespan: loads port pool, starts background cleanup task, configures logging.
+  - Lifespan: cleans orphaned workers, loads port pool, starts background cleanup task, configures logging.
+  - Stop: Ctrl+C triggers graceful shutdown that terminates all active sessions and frees all ports.
 - Tests: `pytest -v` (health/root tests in `tests/`). Ensure venv is activated.
 - Config: Edit `config.toml` for port pool range, idle timeout, logging, auth settings.
+- Orphaned workers: Run `scripts/cleanup_orphaned_workers.sh` to manually clean up workers if server crashed ungracefully.
 
 ## API workflow (happy path)
 
-1) POST `/dash/start-session` → spawns worker, waits for readiness, returns `{ client_id, port, created_at, last_activity, ... }`.
-2) POST `/send/{client_id}` with body like:
+1) POST `/dash/start-session` → spawns worker, waits for readiness, returns `{ session_id, port, created_at, last_activity, ... }`.
+2) POST `/send/{session_id}` with body like:
    `{ "command": "set_value", "twig": "period@binary", "value": 1.5 }` → proxied to worker, updates `last_activity`.
-   - Available commands: `ping`, `get_value`, `set_value`, `run_compute`, `attach_params`, etc. (see `PhoebeWorker.commands`).
-3) POST `/dash/end-session/{client_id}` → terminates worker (graceful then kill), frees port.
+   - Available commands: `ping`, `get_value`, `set_value`, `run_compute`, `attach_parameters`, etc. (see `PhoebeWorker.commands`).
+3) POST `/dash/end-session/{session_id}` → terminates worker (graceful then kill), frees port.
 4) GET `/dash/sessions` → lists all active sessions (cleans up idle sessions first).
 5) GET `/dash/port-status` → shows total/reserved/available ports and range.
 

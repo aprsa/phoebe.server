@@ -24,7 +24,7 @@ def make_json_serializable(obj):
         return str(obj)
     elif isinstance(obj, u.Quantity):
         return {
-            'value': obj.value,
+            'value': make_json_serializable(obj.value),
             'unit': make_json_serializable(obj.unit)
         }
     elif isinstance(obj, dict):
@@ -60,13 +60,14 @@ class PhoebeWorker:
             'remove_dataset': self.remove_dataset,
             'run_compute': self.run_compute,
             'run_solver': self.run_solver,
+            'get_bundle': self.get_bundle,
             'load_bundle': self.load_bundle,
             'save_bundle': self.save_bundle,
             'get_datasets': self.get_datasets,
             'get_uniqueid': self.get_uniqueid,
             'is_parameter_constrained': self.is_parameter_constrained,
             # auxiliary commands:
-            'attach_params': self.attach_params,
+            'attach_parameters': self.attach_parameters,
         }
 
         print(f"[phoebe_worker] Running on port {port}")
@@ -108,18 +109,25 @@ class PhoebeWorker:
         """Health check / readiness probe."""
         return {'status': 'ready'}
 
-    def get_parameter(self, twig):
-        par = self.bundle.get_parameter(twig)
+    def get_parameter(self, **kwargs):
+        par = self.bundle.get_parameter(**kwargs)
         par_dict = par.to_dict()
         par_dict['Class'] = par.__class__.__name__
         return par_dict
 
-    def get_value(self, twig=None, uniqueid=None, **kwargs):
-        return self.bundle.get_value(twig=twig, uniqueid=uniqueid)
+    def get_value(self, **kwargs):
+        try:
+            value = self.bundle.get_value(**kwargs)
+            return value
+        except Exception:
+            raise
 
-    def set_value(self, twig=None, uniqueid=None, value=None, **kwargs):
-        self.bundle.set_value(twig=twig, uniqueid=uniqueid, value=value)
-        return {'success': True}
+    def set_value(self, value, **kwargs):
+        try:
+            self.bundle.set_value(value=value, **kwargs)
+            return {}
+        except Exception:
+            raise
 
     def add_dataset(self, **kwargs):
         self.bundle.add_dataset(**kwargs)
@@ -154,14 +162,26 @@ class PhoebeWorker:
 
     def run_solver(self, **kwargs):
         self.bundle.run_solver(**kwargs)
-        return {'success': True}
+
+        fit_parameters = self.bundle.get_value('fitted_twigs', context='solution')
+        init_values = self.bundle.get_value('initial_values', context='solution')
+        fitted_values = self.bundle.get_value('fitted_values', context='solution')
+
+        return {'solution': {
+            'fit_parameters': fit_parameters,
+            'initial_values': init_values,
+            'fitted_values': fitted_values
+        }}
+
+    def get_bundle(self, **kwargs):
+        return {'bundle': json.dumps(self.bundle.to_json(incl_uniqueid=True))}
 
     def load_bundle(self, bundle, **kwargs):
         self.bundle = phoebe.load(json.loads(bundle, object_pairs_hook=phoebe.utils.parse_json))  # type: ignore
         return {'success': True}
 
     def save_bundle(self, **kwargs):
-        return {'bundle': self.bundle.to_json()}
+        return {'bundle': json.dumps(self.bundle.to_json(incl_uniqueid=True))}
 
     def get_datasets(self, **kwargs):
         datasets = {}
@@ -176,7 +196,7 @@ class PhoebeWorker:
         par = self.bundle.get_parameter(twig=twig, uniqueid=uniqueid)
         return bool(par.constrained_by)
 
-    def attach_params(self, params: list[dict[str, Any]]):
+    def attach_parameters(self, parameters: list[dict[str, Any]]):
         """
         Implements adding custom parameters to the bundle. Parameters are
         passed as a list of dictionaries with the following mandatory keys:
@@ -218,22 +238,22 @@ class PhoebeWorker:
             'string': StringParameter,
         }
 
-        parameters = []
-        for param in params:
-            ptype = param.pop('ptype')
+        params = []
+        for parameter in parameters:
+            ptype = parameter.pop('ptype')
             if ptype not in ptype_class:
                 raise ValueError(f"Unsupported parameter type: {ptype}")
 
-            parameters.append(ptype_class[ptype](**param))
+            params.append(ptype_class[ptype](**parameter))
 
         try:
-            self.bundle._attach_params(parameters)
+            self.bundle._attach_params(params)
         except Exception as e:
             print(f"Error attaching parameters: {e}")
 
-        unique_ids = [par.uniqueid for par in parameters]
+        unique_ids = [par['uniqueid'] for par in params]
 
-        return {'success': True, 'unique_ids': unique_ids}
+        return {'unique_ids': unique_ids}
 
 
 def main(port: int):

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .api import session, command, health
-from .manager.session_manager import load_port_config, cleanup_idle_sessions
+from .manager.session_manager import load_port_config, cleanup_idle_sessions, shutdown_all_sessions
 from .config import config
 from . import database
 
@@ -32,12 +32,18 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    logger.info("PHOEBE Server shutting down - closing all sessions")
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
-    logger.info("PHOEBE Server shutting down")
+
+    # Shutdown all active sessions to free ports
+    count = shutdown_all_sessions()
+    if count > 0:
+        logger.info(f"Shut down {count} active sessions")
+    logger.info("PHOEBE Server shutdown complete")
 
 
 async def periodic_cleanup():

@@ -2,7 +2,7 @@
 
 from .session_manager import (
     load_port_config,
-    launch_phoebe_server,
+    launch_phoebe_worker,
     shutdown_server,
     list_sessions,
     get_server_info,
@@ -13,7 +13,7 @@ from .session_manager import (
 
 __all__ = [
     'load_port_config',
-    'launch_phoebe_server',
+    'launch_phoebe_worker',
     'shutdown_server',
     'list_sessions',
     'get_server_info',

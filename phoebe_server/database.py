@@ -65,6 +65,7 @@ def init_database():
                 session_id TEXT PRIMARY KEY,
                 first_name TEXT,
                 last_name TEXT,
+                email TEXT,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions (session_id)
             )
@@ -196,15 +197,15 @@ def log_command_execution(session_id: str, timestamp: float, command_name: str, 
         logger.error(f"Failed to log command execution: {e}")
 
 
-def log_user_info_update(session_id: str, first_name: str | None, last_name: str | None, updated_at: float):
+def log_user_info_update(session_id: str, first_name: str, last_name: str, email: str, updated_at: float):
     """Log or update user information for a session."""
     try:
         with get_db() as db:
             db.execute("""
                 INSERT OR REPLACE INTO session_user_info
-                (session_id, first_name, last_name, updated_at)
-                VALUES (?, ?, ?, ?)
-            """, (session_id, first_name, last_name, updated_at))
+                (session_id, first_name, last_name, email, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (session_id, first_name, last_name, email, updated_at))
             db.commit()
     except Exception as e:
         logger.error(f"Failed to log user info update: {e}")

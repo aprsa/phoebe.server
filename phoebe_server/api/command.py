@@ -10,15 +10,15 @@ from ..auth import verify_api_key
 router = APIRouter()
 
 
-@router.post('/send/{client_id}', dependencies=[Depends(verify_api_key)])
-async def send(client_id: str, command: dict):
+@router.post('/send/{session_id}', dependencies=[Depends(verify_api_key)])
+async def send(session_id: str, command: dict):
     """Send a command to a PHOEBE session."""
-    info = session_manager.get_server_info(client_id)
+    info = session_manager.get_server_info(session_id)
     if not info:
-        raise HTTPException(status_code=404, detail='Invalid client ID')
+        raise HTTPException(status_code=404, detail='Invalid session ID')
 
     # Update activity timestamp
-    session_manager.update_last_activity(client_id)
+    session_manager.update_last_activity(session_id)
 
     port = info['port']
     command_name = command.get('command', 'unknown')
@@ -33,7 +33,7 @@ async def send(client_id: str, command: dict):
     error_message = response.get('error') if not success else None
 
     database.log_command_execution(
-        session_id=client_id,
+        session_id=session_id,
         timestamp=time.time(),
         command_name=command_name,
         success=success,
@@ -42,6 +42,6 @@ async def send(client_id: str, command: dict):
     )
 
     # Poll memory after command execution
-    session_manager.get_current_memory_usage(client_id)
+    session_manager.get_current_memory_usage(session_id)
 
     return response
