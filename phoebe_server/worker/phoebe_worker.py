@@ -149,7 +149,6 @@ class PhoebeWorker:
         model = {}
 
         # We now need to traverse all datasets and assign the results accordingly:
-        print(f'{self.bundle.datasets=}')
         for dataset in self.bundle.datasets:
             kind = self.bundle[f'{dataset}@dataset'].kind  # 'lc' or 'rv'
 
